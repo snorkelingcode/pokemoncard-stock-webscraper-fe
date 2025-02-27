@@ -9,6 +9,9 @@ from datetime import datetime
 import argparse
 import sys
 import re
+import random
+from urllib.parse import urljoin
+
 
 # Set up logging
 logging.basicConfig(
@@ -23,13 +26,23 @@ class PokemonTCGTracker:
         with open(config_file, 'r') as f:
             self.config = json.load(f)
         
-        self.user_agent = self.config.get('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+        # Use a list of user agents to rotate
+        self.user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
+        ]
         self.check_interval = self.config.get('check_interval', 1800)  # Default 30 minutes
         self.retail_price_thresholds = self.config.get('retail_price_thresholds', {})
         self.email_config = self.config.get('email_config', {})
         
         # Store results
         self.in_stock_items = []
+        
+        # Create a session that we'll reuse
+        self.session = requests.Session()
         
         # Set up recent expansions for validation
         self.recent_expansions = [
@@ -38,34 +51,126 @@ class PokemonTCGTracker:
             '151', 'crown zenith', 'silver tempest', 'lost origin',
             'astral radiance', 'brilliant stars', 'celebrations'
         ]
+        
+        # Store for direct GameStop product URLs
+        self.gamestop_product_urls = [
+            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-151-elite-trainer-box/368947.html",
+            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-crown-zenith-special-collection-pikachu-vmax/351599.html",
+            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-paldean-fates-elite-trainer-box/377146.html",
+            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-twilight-masquerade-booster-box/393851.html",
+            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-twilight-masquerade-elite-trainer-box/393846.html"
+        ]
     
     def get_headers(self):
         """Generate request headers to mimic a browser"""
+        # Randomly select a user agent
+        user_agent = random.choice(self.user_agents)
+        
         return {
-            'User-Agent': self.user_agent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'User-Agent': user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.google.com/',
+            'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         }
     
     def fetch_page(self, url):
-        """Fetch a page with error handling and retry logic"""
+        """Fetch a page with improved anti-bot circumvention"""
         max_retries = 3
+        
         for attempt in range(max_retries):
             try:
-                response = requests.get(url, headers=self.get_headers(), timeout=10)
+                # Add random delay to mimic human behavior
+                delay = random.uniform(1, 3)
+                time.sleep(delay)
+                
+                # Use our session with fresh headers each time
+                headers = self.get_headers()
+                
+                # Add cookies from previous requests
+                response = self.session.get(url, headers=headers, timeout=15)
                 response.raise_for_status()
+                
+                # Check for anti-bot measures
+                if "captcha" in response.text.lower() or "robot" in response.text.lower():
+                    logging.warning(f"CAPTCHA detected on {url}, retrying...")
+                    # Wait longer before retry
+                    time.sleep(random.uniform(5, 10))
+                    continue
+                    
+                # Check for very small responses (usually blocking)
+                if len(response.text) < 1000 and "403" in response.text:
+                    logging.warning(f"Possible block on {url}, response too small")
+                    time.sleep(random.uniform(5, 10))
+                    continue
+                    
                 return response.text
+                
             except requests.exceptions.RequestException as e:
                 logging.error(f"Error fetching {url}: {str(e)}")
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
-                    logging.info(f"Retrying in {wait_time} seconds...")
+                    wait_time = (2 ** attempt) + random.uniform(1, 3)  # Exponential backoff with jitter
+                    logging.info(f"Retrying in {wait_time:.2f} seconds...")
                     time.sleep(wait_time)
                 else:
                     logging.error(f"Failed to fetch {url} after {max_retries} attempts")
                     return None
+    
+    def validate_product_link(self, product_url, expected_type, expected_name=None):
+        """
+        Validate that a product URL leads to the expected product type
+        Returns True if the product page matches expectations
+        """
+        try:
+            html = self.fetch_page(product_url)
+            if not html:
+                return False
+            
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Extract the actual product title from the product page
+            product_title = None
+            # Try different selectors for product title on different sites
+            title_selectors = ['h1.product-name', '.product-title', '.pdp-title', 'h1.title', '.product-detail-name']
+            for selector in title_selectors:
+                title_elem = soup.select_one(selector)
+                if title_elem:
+                    product_title = title_elem.text.strip()
+                    break
+            
+            if not product_title:
+                return False
+            
+            # If we have an expected name, check it
+            if expected_name and expected_name.lower() not in product_title.lower():
+                logging.info(f"Product name mismatch. Expected: '{expected_name}', Found: '{product_title}'")
+                return False
+            
+            # Check if the product title contains the expected product type
+            product_title_lower = product_title.lower()
+            expected_type_lower = expected_type.lower()
+            
+            # For booster box, check for both "booster" and "box"
+            if expected_type_lower == "booster box":
+                return "booster" in product_title_lower and "box" in product_title_lower
+            
+            # For ETB
+            if expected_type_lower == "elite trainer box" or expected_type_lower == "etb":
+                return ("elite" in product_title_lower and "trainer" in product_title_lower) or "etb" in product_title_lower
+            
+            # For other products, check if the type is in the title
+            return expected_type_lower in product_title_lower
+            
+        except Exception as e:
+            logging.error(f"Error validating product link {product_url}: {str(e)}")
+            return False
     
     def determine_product_type(self, product_name):
         """
@@ -91,6 +196,8 @@ class PokemonTCGTracker:
             return 'blister pack'
         elif 'bundle' in name_lower:
             return 'bundle'
+        elif 'battle deck' in name_lower or 'theme deck' in name_lower:
+            return 'deck'
         
         # Check for more generic terms
         if 'box' in name_lower and ('booster' in name_lower or 'boosters' in name_lower):
@@ -135,6 +242,13 @@ class PokemonTCGTracker:
         ]
         
         for product in products:
+            # Skip products with validation errors or without URLs
+            if 'validation_error' in product and product['validation_error']:
+                continue
+                
+            if 'url' not in product or not product['url']:
+                continue
+                
             name = product['name'].lower()
             url = product['url'].lower()
             
@@ -243,25 +357,72 @@ class PokemonTCGTracker:
                 in_stock_status = availability_elem and ("in stock" in availability_elem.text.lower() or 
                                                          "add to cart" in availability_elem.text.lower())
                 
-                # Check if price is at retail level
-                is_retail_price = False
+                if not in_stock_status:
+                    continue
+                
+                # Determine product type
                 product_type = self.determine_product_type(name)
                 
+                # Check if price is at retail level
+                is_retail_price = False
                 for type_name, threshold in self.retail_price_thresholds.items():
                     if type_name.lower() in product_type.lower() and price <= threshold:
                         is_retail_price = True
                         break
                 
-                if in_stock_status and is_retail_price:
-                    # Add the product if it passes initial checks
-                    in_stock.append({
-                        'name': name,
-                        'price': price,
-                        'url': product_url,
-                        'store': 'Pokemon Center',
-                        'type': product_type
-                    })
-                    logging.info(f"Found in-stock item at retail price: {name} - ${price}")
+                if not is_retail_price:
+                    continue
+                
+                # Validate the product link before adding it
+                validation_success = self.validate_product_link(product_url, product_type, name)
+                
+                if not validation_success:
+                    logging.info(f"Validation failed for product: {name} - {product_url}")
+                    continue
+                
+                # All checks passed, add the product
+                in_stock.append({
+                    'name': name,
+                    'price': price,
+                    'url': product_url,
+                    'store': 'Best Buy',
+                    'type': product_type,
+                    'validation_error': False
+                })
+                logging.info(f"Found in-stock item at retail price: {name} - ${price}")
+            
+            except Exception as e:
+                logging.error(f"Error processing Best Buy product: {str(e)}")        
+                # Determine product type
+                product_type = self.determine_product_type(name)
+                
+                # Check if price is at retail level
+                is_retail_price = False
+                for type_name, threshold in self.retail_price_thresholds.items():
+                    if type_name.lower() in product_type.lower() and price <= threshold:
+                        is_retail_price = True
+                        break
+                
+                if not is_retail_price:
+                    continue
+                
+                # Validate the product link before adding it
+                validation_success = self.validate_product_link(product_url, product_type, name)
+                
+                if not validation_success:
+                    logging.info(f"Validation failed for product: {name} - {product_url}")
+                    continue
+                
+                # All checks passed, add the product
+                in_stock.append({
+                    'name': name,
+                    'price': price,
+                    'url': product_url,
+                    'store': 'Pokemon Center',
+                    'type': product_type,
+                    'validation_error': False
+                })
+                logging.info(f"Found in-stock item at retail price: {name} - ${price}")
             
             except Exception as e:
                 logging.error(f"Error processing Pokemon Center product: {str(e)}")
@@ -332,7 +493,6 @@ class PokemonTCGTracker:
                     product_url = "https://www.target.com" + product_url
                 
                 # Availability is harder to determine on Target - we'll assume it's in stock if we can see it
-                # but for better accuracy, you might need to click through to the product page
                 in_stock_status = True
                 
                 # Determine product type
@@ -345,15 +505,26 @@ class PokemonTCGTracker:
                         is_retail_price = True
                         break
                 
-                if in_stock_status and is_retail_price:
-                    in_stock.append({
-                        'name': name,
-                        'price': price,
-                        'url': product_url,
-                        'store': 'Target',
-                        'type': product_type
-                    })
-                    logging.info(f"Found in-stock item at retail price: {name} - ${price}")
+                if not is_retail_price:
+                    continue
+                
+                # Validate the product link before adding it
+                validation_success = self.validate_product_link(product_url, product_type, name)
+                
+                if not validation_success:
+                    logging.info(f"Validation failed for product: {name} - {product_url}")
+                    continue
+                
+                # All checks passed, add the product
+                in_stock.append({
+                    'name': name,
+                    'price': price,
+                    'url': product_url,
+                    'store': 'Target',
+                    'type': product_type,
+                    'validation_error': False
+                })
+                logging.info(f"Found in-stock item at retail price: {name} - ${price}")
             
             except Exception as e:
                 logging.error(f"Error processing Target product: {str(e)}")
@@ -426,7 +597,6 @@ class PokemonTCGTracker:
                     product_url = "https://www.walmart.com" + product_url
                 
                 # Since we're looking at search results, we'll assume items are in stock
-                # For better accuracy, would need to click through to product page
                 in_stock_status = True
                 
                 # Determine product type
@@ -439,341 +609,129 @@ class PokemonTCGTracker:
                         is_retail_price = True
                         break
                 
-                if in_stock_status and is_retail_price:
-                    in_stock.append({
-                        'name': name,
-                        'price': price,
-                        'url': product_url,
-                        'store': 'Walmart',
-                        'type': product_type
-                    })
-                    logging.info(f"Found in-stock item at retail price: {name} - ${price}")
+                if not is_retail_price:
+                    continue
+                
+                # Validate the product link before adding it
+                validation_success = self.validate_product_link(product_url, product_type, name)
+                
+                if not validation_success:
+                    logging.info(f"Validation failed for product: {name} - {product_url}")
+                    continue
+                
+                # All checks passed, add the product
+                in_stock.append({
+                    'name': name,
+                    'price': price,
+                    'url': product_url,
+                    'store': 'Walmart',
+                    'type': product_type,
+                    'validation_error': False
+                })
+                logging.info(f"Found in-stock item at retail price: {name} - ${price}")
             
             except Exception as e:
                 logging.error(f"Error processing Walmart product: {str(e)}")
         
         return in_stock
     
-    def check_bestbuy(self):
-        """Check Best Buy for Pokemon cards with improved filtering"""
-        logging.info("Checking Best Buy...")
-        url = "https://www.bestbuy.com/site/searchpage.jsp?st=pokemon+trading+card+game"
-        html = self.fetch_page(url)
-        
-        if not html:
-            return []
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        in_stock = []
-        
-        # Try different possible selectors for products
-        product_elements = (soup.select('.sku-item') or 
-                           soup.select('.list-item') or
-                           soup.select('.product-item'))
-        
-        for product in product_elements:
-            try:
-                # Try different possible selectors
-                name_elem = (product.select_one('.sku-title a') or 
-                            product.select_one('.sku-header a') or
-                            product.select_one('.product-title'))
-                
-                price_elem = (product.select_one('.priceView-customer-price span') or 
-                             product.select_one('.pricing-price span') or
-                             product.select_one('.price-block'))
-                
-                # Best Buy shows "Add to Cart" button only for in-stock items
-                availability_elem = (product.select_one('.fulfillment-add-to-cart-button button') or
-                                    product.select_one('.add-to-cart-button'))
-                
-                url_elem = name_elem  # The name element is usually a link
-                
-                if not all([name_elem, price_elem, url_elem]):
-                    continue
-                
-                name = name_elem.text.strip()
-                
-                # Filter by TCG keywords
-                tcg_keywords = ['booster', 'pack', 'box', 'etb', 'elite trainer', 'tin', 'collection', 
-                               'deck', 'tcg', 'trading card', 'pokemon cards']
-                
-                if not any(keyword in name.lower() for keyword in tcg_keywords):
-                    continue  # Skip non-TCG products
-                    
-                # Exclude known non-TCG products
-                exclude_terms = ['plush', 'figure', 'toy', 'costume', 'shirt', 'game', 'video game', 
-                               'switch', 'playmat', 'binder', 'sleeves', 'case', 'storage']
-                
-                if any(term in name.lower() for term in exclude_terms):
-                    continue
-                    
-                # Extract the price using regex to handle different formats
-                price_text = price_elem.text.strip()
-                price_match = re.search(r'(\d+\.\d+)', price_text)
-                if not price_match:
-                    continue
-                    
-                try:
-                    price = float(price_match.group(1))
-                except ValueError:
-                    continue
-                    
-                product_url = url_elem['href']
-                if not product_url.startswith('http'):
-                    product_url = "https://www.bestbuy.com" + product_url
-                
-                # Check if in stock (button exists and doesn't say "Sold Out")
-                in_stock_status = availability_elem and "sold out" not in availability_elem.text.lower()
-                
-                # Determine product type
-                product_type = self.determine_product_type(name)
-                
-                # Check if price is at retail level
-                is_retail_price = False
-                for type_name, threshold in self.retail_price_thresholds.items():
-                    if type_name.lower() in product_type.lower() and price <= threshold:
-                        is_retail_price = True
-                        break
-                
-                if in_stock_status and is_retail_price:
-                    in_stock.append({
-                        'name': name,
-                        'price': price,
-                        'url': product_url,
-                        'store': 'Best Buy',
-                        'type': product_type
-                    })
-                    logging.info(f"Found in-stock item at retail price: {name} - ${price}")
-            
-            except Exception as e:
-                logging.error(f"Error processing Best Buy product: {str(e)}")
-        
-        return in_stock
+def check_bestbuy(self):
+    """Check Best Buy for Pokemon cards with improved filtering"""
+    logging.info("Checking Best Buy...")
+    url = "https://www.bestbuy.com/site/searchpage.jsp?st=pokemon+trading+card+game"
+    html = self.fetch_page(url)
     
-    def check_gamestop(self):
-        """Check GameStop for Pokemon cards with improved filtering"""
-        logging.info("Checking GameStop...")
-        url = "https://www.gamestop.com/search/?q=pokemon+trading+cards&lang=default"
-        html = self.fetch_page(url)
-        
-        if not html:
-            return []
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        in_stock = []
-        
-        # Try different possible selectors for products
-        product_elements = (soup.select('.product-tile') or 
-                           soup.select('.product-grid-tile') or
-                           soup.select('.product'))
-        
-        for product in product_elements:
-            try:
-                # Try different possible selectors
-                name_elem = (product.select_one('.link-name') or 
-                            product.select_one('.product-name') or
-                            product.select_one('.product-tile-name'))
-                
-                price_elem = (product.select_one('.actual-price') or 
-                             product.select_one('.product-price') or
-                             product.select_one('.price-display'))
-                
-                availability_elem = (product.select_one('.availability') or
-                                    product.select_one('.product-availability'))
-                
-                url_elem = (product.select_one('a.link-name') or
-                           product.select_one('a.product-link'))
-                
-                if not all([name_elem, price_elem, url_elem]):
-                    continue
-                
-                name = name_elem.text.strip()
-                
-                # Filter by TCG keywords
-                tcg_keywords = ['booster', 'pack', 'box', 'etb', 'elite trainer', 'tin', 'collection', 
-                               'deck', 'tcg', 'trading card', 'pokemon cards']
-                
-                if not any(keyword in name.lower() for keyword in tcg_keywords):
-                    continue  # Skip non-TCG products
-                    
-                # Exclude known non-TCG products
-                exclude_terms = ['plush', 'figure', 'toy', 'costume', 'shirt', 'game', 'video game', 
-                               'switch', 'playmat', 'binder', 'sleeves', 'case', 'storage']
-                
-                if any(term in name.lower() for term in exclude_terms):
-                    continue
-                    
-                # Extract the price using regex to handle different formats
-                price_text = price_elem.text.strip()
-                price_match = re.search(r'(\d+\.\d+)', price_text)
-                if not price_match:
-                    continue
-                    
-                try:
-                    price = float(price_match.group(1))
-                except ValueError:
-                    continue
-                    
-                product_url = url_elem['href']
-                if not product_url.startswith('http'):
-                    product_url = "https://www.gamestop.com" + product_url
-                
-                # Check if in stock
-                in_stock_status = availability_elem and "in stock" in availability_elem.text.lower()
-                
-                # Determine product type
-                product_type = self.determine_product_type(name)
-                
-                # Check if price is at retail level
-                is_retail_price = False
-                for type_name, threshold in self.retail_price_thresholds.items():
-                    if type_name.lower() in product_type.lower() and price <= threshold:
-                        is_retail_price = True
-                        break
-                
-                if in_stock_status and is_retail_price:
-                    in_stock.append({
-                        'name': name,
-                        'price': price,
-                        'url': product_url,
-                        'store': 'GameStop',
-                        'type': product_type
-                    })
-                    logging.info(f"Found in-stock item at retail price: {name} - ${price}")
-            
-            except Exception as e:
-                logging.error(f"Error processing GameStop product: {str(e)}")
-        
-        return in_stock
+    if not html:
+        return []
     
-    def send_email_notification(self, items):
-        """Send email notification for in-stock items"""
-        if not items or not self.email_config:
-            return
-        
+    soup = BeautifulSoup(html, 'html.parser')
+    in_stock = []
+    
+    # Try different possible selectors for products
+    product_elements = (soup.select('.sku-item') or 
+                       soup.select('.list-item') or
+                       soup.select('.product-item'))
+    
+    for product in product_elements:
         try:
-            sender = self.email_config.get('sender')
-            recipient = self.email_config.get('recipient')
-            password = self.email_config.get('password')
-            smtp_server = self.email_config.get('smtp_server', 'smtp.gmail.com')
-            smtp_port = self.email_config.get('smtp_port', 587)
+            # Try different possible selectors
+            name_elem = (product.select_one('.sku-title a') or 
+                        product.select_one('.sku-header a') or
+                        product.select_one('.product-title'))
             
-            if not all([sender, recipient, password]):
-                logging.error("Email configuration incomplete")
-                return
+            price_elem = (product.select_one('.priceView-customer-price span') or 
+                         product.select_one('.pricing-price span') or
+                         product.select_one('.price-block'))
             
-            # Create email content
-            subject = f"Pokemon TCG Alert: {len(items)} Items Found at Retail Price!"
+            # Best Buy shows "Add to Cart" button only for in-stock items
+            availability_elem = (product.select_one('.fulfillment-add-to-cart-button button') or
+                                product.select_one('.add-to-cart-button'))
             
-            body = "The following Pokemon TCG items were found in stock at retail prices:\n\n"
-            for item in items:
-                body += f"• {item['name']} - ${item['price']} at {item['store']}\n"
-                body += f"  Type: {item['type']}\n"
-                body += f"  Link: {item['url']}\n\n"
+            url_elem = name_elem  # The name element is usually a link
             
-            body += f"\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            if not all([name_elem, price_elem, url_elem]):
+                continue
             
-            msg = MIMEText(body)
-            msg['Subject'] = subject
-            msg['From'] = sender
-            msg['To'] = recipient
+            name = name_elem.text.strip()
             
-            # Send email
-            with smtplib.SMTP(smtp_server, smtp_port) as server:
-                server.starttls()
-                server.login(sender, password)
-                server.send_message(msg)
+            # Filter by TCG keywords
+            tcg_keywords = ['booster', 'pack', 'box', 'etb', 'elite trainer', 'tin', 'collection', 
+                           'deck', 'tcg', 'trading card', 'pokemon cards']
             
-            logging.info(f"Email notification sent for {len(items)} items")
+            if not any(keyword in name.lower() for keyword in tcg_keywords):
+                continue  # Skip non-TCG products
+                
+            # Exclude known non-TCG products
+            exclude_terms = ['plush', 'figure', 'toy', 'costume', 'shirt', 'game', 'video game', 
+                           'switch', 'playmat', 'binder', 'sleeves', 'case', 'storage']
+            
+            if any(term in name.lower() for term in exclude_terms):
+                continue
+                
+            # Extract the price using regex to handle different formats
+            price_text = price_elem.text.strip()
+            price_match = re.search(r'(\d+\.\d+)', price_text)
+            if not price_match:
+                continue
+                
+            try:
+                price = float(price_match.group(1))
+            except ValueError:
+                continue
+                
+            product_url = url_elem['href']
+            if not product_url.startswith('http'):
+                product_url = "https://www.bestbuy.com" + product_url
+            
+            # Check if in stock (button exists and doesn't say "Sold Out")
+            in_stock_status = availability_elem and "sold out" not in availability_elem.text.lower()
+            
+            if not in_stock_status:
+                continue
+            
+            # Determine product type
+            product_type = self.determine_product_type(name)
+            
+            # Check if price is at retail level
+            is_retail_price = False
+            for type_name, threshold in self.retail_price_thresholds.items():
+                if type_name.lower() in product_type.lower() and price <= threshold:
+                    is_retail_price = True
+                    break
+            
+            if is_retail_price:
+                in_stock.append({
+                    'name': name,
+                    'price': price,
+                    'url': product_url,
+                    'store': 'Best Buy',
+                    'type': product_type
+                })
+                logging.info(f"Found in-stock item at retail price: {name} - ${price}")
         
         except Exception as e:
-            logging.error(f"Error sending email: {str(e)}")
-    
-    def check_all_sites(self):
-        """Check all sites for in-stock Pokemon TCG items with enhanced validation"""
-        raw_results = []
-        
-        # Check each site
-        raw_results.extend(self.check_pokemoncenter())
-        raw_results.extend(self.check_target())
-        raw_results.extend(self.check_walmart())
-        raw_results.extend(self.check_bestbuy())
-        raw_results.extend(self.check_gamestop())
-        
-        # Apply strict validation to ensure only TCG products are included
-        validated_products = self.validate_products(raw_results)
-        
-        # Store results
-        self.in_stock_items = validated_products
-        
-        # Save results to file
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        with open(f'results_{timestamp}.json', 'w') as f:
-            json.dump(validated_products, f, indent=2)
-        
-        # Send notification if items found
-        if validated_products:
-            self.send_email_notification(validated_products)
-        
-        return validated_products
-    
-    def run(self):
-        """Run the tracker continuously"""
-        logging.info("Starting Pokemon TCG Tracker")
-        
-        while True:
-            try:
-                logging.info("Checking sites for Pokemon TCG items at retail prices...")
-                results = self.check_all_sites()
-                
-                if results:
-                    logging.info(f"Found {len(results)} items in stock at retail prices")
-                else:
-                    logging.info("No items found in stock at retail prices")
-                
-                # Wait for next check
-                logging.info(f"Waiting {self.check_interval} seconds until next check...")
-                time.sleep(self.check_interval)
+            logging.error(f"Error processing Best Buy product: {str(e)}")
+
             
-            except KeyboardInterrupt:
-                logging.info("Tracker stopped by user")
-                break
-            except Exception as e:
-                logging.error(f"Error in main loop: {str(e)}")
-                # Wait a bit before retrying
-                time.sleep(60)
-
-
-if __name__ == "__main__":
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Pokemon TCG Stock Tracker')
-    parser.add_argument('--config', type=str, help='Path to config file')
-    parser.add_argument('--once', action='store_true', help='Run once and exit')
-    parser.add_argument('--json', action='store_true', help='Output results as JSON to stdout')
-    args = parser.parse_args()
     
-    # Initialize tracker with config file
-    config_file = args.config if args.config else "config.json"
-    tracker = PokemonTCGTracker(config_file)
-    
-    if args.once:
-        # Run the scraper once and exit
-        results = tracker.check_all_sites()
-        
-        if args.json:
-            # Print results as JSON to stdout
-            print(json.dumps(results))
-        else:
-            # Print results in a human-readable format
-            print(f"Found {len(results)} products in stock at retail prices:")
-            for product in results:
-                print(f"- {product['name']} (${product['price']}) at {product['store']}")
-                print(f"  Type: {product['type']}")
-                print(f"  URL: {product['url']}")
-                print()
-        
-        # Exit the script
-        sys.exit(0)
-    else:
-        # Run continuously as before
-        tracker.run()
+    return in_stock

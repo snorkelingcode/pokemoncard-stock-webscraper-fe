@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 import subprocess
 import json
 import os
-from datetime import datetime
+from datetime import datetime 
 import logging
 import sys
 
@@ -91,73 +91,64 @@ async def run_scraper(config: ScraperConfig):
         is_scraping = True
         logging.info("Starting scraper with config: %s", config.dict())
         
-        # For Vercel deployment, we'll use sample data since we can't run long processes
-        # In a real implementation, you'd use a separate service or API for scraping
-        sample_products = [
-            {
-                "name": "Pokémon TCG: Scarlet & Violet - Twilight Masquerade Booster Box",
-                "price": 143.99,
-                "url": "https://www.pokemoncenter.com/product/699-17070/",
-                "store": "Pokemon Center",
-                "type": "booster box"
-            },
-            {
-                "name": "Pokémon TCG: Scarlet & Violet - Twilight Masquerade Elite Trainer Box",
-                "price": 49.99,
-                "url": "https://www.target.com/p/pokemon-tcg-scarlet-violet-elite-trainer-box/-/A-88392018",
-                "store": "Target",
-                "type": "elite trainer box"
-            },
-            {
-                "name": "Pokémon TCG: Paldean Fates Premium Collection - Miraidon ex",
-                "price": 39.99,
-                "url": "https://www.bestbuy.com/site/pokemon-tcg-paldean-fates-premium-collection/6566306.p",
-                "store": "Best Buy",
-                "type": "premium collection"
-            },
-            {
-                "name": "Pokémon TCG: Scarlet & Violet - Twilight Masquerade 3-Pack Blister",
-                "price": 12.99,
-                "url": "https://www.walmart.com/ip/pokemon-tcg-blister-pack/645383971",
-                "store": "Walmart",
-                "type": "blister pack"
-            },
-            {
-                "name": "Pokémon TCG: Crown Zenith Special Collection - Pikachu VMAX",
-                "price": 24.99,
-                "url": "https://www.gamestop.com/pokemon-tcg-crown-zenith-special-collection/1992913.html",
-                "store": "GameStop",
-                "type": "special collection"
-            }
-        ]
+        # Write config to temporary file
+        temp_config_path = os.path.join(os.path.dirname(__file__), "temp_config.json")
+        with open(temp_config_path, "w") as f:
+            json.dump({
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                "check_interval": config.check_interval,
+                "retail_price_thresholds": config.thresholds,
+                "email_config": {}  # No email needed since we're using the API
+            }, f, indent=2)
         
-        # Filter by selected retailers
-        filtered_results = [r for r in sample_products if r["store"] in config.retailers]
+        # Run the scraper as a subprocess (one-time run, not continuous)
+        process = subprocess.Popen(
+            ["python", SCRAPER_SCRIPT, "--config", temp_config_path, "--once", "--json"],
+            stdout=subprocess.PIPE
+        )
         
-        # Convert to Product objects
-        products = []
-        for item in filtered_results:
-            product_type = item["type"]
-            products.append(Product(
-                name=item["name"],
-                price=item["price"],
-                url=item["url"],
-                store=item["store"],
-                type=product_type,
-                image="/api/placeholder/400/320"
-            ))
+        # Wait for process to complete and get output
+        stdout, _ = process.communicate()
         
-        # Update global state
-        last_results = products
-        last_update_time = datetime.now()
-        
-        logging.info("Scraper completed. Found %d products", len(products))
+        # Parse results
+        try:
+            results = json.loads(stdout.decode('utf-8').strip())
+            # Filter by selected retailers
+            filtered_results = [r for r in results if r["store"] in config.retailers]
+            
+            # Convert to Product objects
+            products = []
+            for item in filtered_results:
+                # Try to determine product type from name
+                product_type = item.get("type", "other")
+                
+                products.append(Product(
+                    name=item["name"],
+                    price=item["price"],
+                    url=item["url"],
+                    store=item["store"],
+                    type=product_type,
+                    image="/api/placeholder/400/320"
+                ))
+            
+            # Update global state
+            last_results = products
+            last_update_time = datetime.now()
+            
+            logging.info("Scraper completed. Found %d products", len(products))
+            
+        except json.JSONDecodeError:
+            logging.error("Failed to parse scraper output")
+            raise HTTPException(status_code=500, detail="Failed to parse scraper output")
         
     except Exception as e:
         logging.error("Error running scraper: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error running scraper: {str(e)}")
     finally:
         is_scraping = False
+        # Clean up
+        if os.path.exists(temp_config_path):
+            os.remove(temp_config_path)
 
 # Original run_scraper function for local development
 async def run_scraper_local(config: ScraperConfig):
@@ -304,3 +295,9 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+if not os.path.exists(SCRAPER_SCRIPT):
+    logging.error(f"Scraper script not found at: {SCRAPER_SCRIPT}")
+    print(f"ERROR: Scraper script not found at: {SCRAPER_SCRIPT}")
+    print(f"Current directory: {os.getcwd()}")
+    print(f"Directory contents: {os.listdir()}")
