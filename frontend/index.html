@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pokémon TCG Stock Tracker</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #3466af;
+        }
+        .status {
+            background-color: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .products {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .product-card {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Pokémon TCG Stock Tracker</h1>
+    
+    <div class="status" id="status">
+        <p>Status: Waiting for data...</p>
+    </div>
+    
+    <button id="refresh-btn">Refresh Products</button>
+    
+    <div class="products" id="products-container">
+        <!-- Products will be displayed here -->
+    </div>
+    
+    <script>
+        // Simple script to fetch products from the API
+        const statusEl = document.getElementById('status');
+        const productsContainer = document.getElementById('products-container');
+        const refreshBtn = document.getElementById('refresh-btn');
+        
+        // Function to fetch products
+        async function fetchProducts() {
+            try {
+                statusEl.innerHTML = '<p>Status: Loading...</p>';
+                
+                const response = await fetch('/api/products');
+                const products = await response.json();
+                
+                if (products.length === 0) {
+                    productsContainer.innerHTML = '<p>No products found at retail prices.</p>';
+                } else {
+                    productsContainer.innerHTML = '';
+                    products.forEach(product => {
+                        const card = document.createElement('div');
+                        card.className = 'product-card';
+                        card.innerHTML = `
+                            <h3>${product.name}</h3>
+                            <p><strong>Price:</strong> $${product.price.toFixed(2)}</p>
+                            <p><strong>Store:</strong> ${product.store}</p>
+                            <p><strong>Type:</strong> ${product.type}</p>
+                            <a href="${product.url}" target="_blank">View Product</a>
+                        `;
+                        productsContainer.appendChild(card);
+                    });
+                }
+                
+                // Update status
+                const statusResponse = await fetch('/api/status');
+                const statusData = await statusResponse.json();
+                
+                statusEl.innerHTML = `
+                    <p><strong>Status:</strong> ${statusData.is_scraping ? 'Scraping in progress' : 'Ready'}</p>
+                    <p><strong>Last Updated:</strong> ${statusData.last_update || 'Never'}</p>
+                    <p><strong>Products Found:</strong> ${statusData.products_count}</p>
+                `;
+                
+            } catch (error) {
+                statusEl.innerHTML = `<p>Error: ${error.message}</p>`;
+                console.error('Error fetching data:', error);
+            }
+        }
+        
+        // Function to trigger scraping
+        async function triggerScrape() {
+            try {
+                const config = {
+                    retailers: ["Pokemon Center", "Target", "Walmart", "Best Buy", "GameStop"],
+                    thresholds: {
+                        "booster pack": 4.99,
+                        "booster box": 149.99,
+                        "elite trainer box": 49.99,
+                        "tin": 29.99,
+                        "special collection": 24.99,
+                        "premium collection": 39.99,
+                        "blister pack": 12.99,
+                        "bundle": 39.99
+                    },
+                    check_interval: 1800
+                };
+                
+                const response = await fetch('/api/scrape', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': 'your-default-api-key'  // This will be replaced by your environment variable
+                    },
+                    body: JSON.stringify(config)
+                });
+                
+                const data = await response.json();
+                statusEl.innerHTML = `<p>Status: ${data.message}</p>`;
+                
+                // Poll for updates
+                setTimeout(fetchProducts, 5000);
+                
+            } catch (error) {
+                statusEl.innerHTML = `<p>Error: ${error.message}</p>`;
+                console.error('Error triggering scrape:', error);
+            }
+        }
+        
+        // Event listeners
+        refreshBtn.addEventListener('click', triggerScrape);
+        
+        // Initial fetch
+        fetchProducts();
+    </script>
+</body>
+</html>

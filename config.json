@@ -1,0 +1,15 @@
+{
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "check_interval": 1800,
+    "retail_price_thresholds": {
+      "booster pack": 4.99,
+      "booster box": 149.99,
+      "elite trainer box": 49.99,
+      "tin": 29.99,
+      "special collection": 24.99,
+      "premium collection": 39.99,
+      "blister pack": 12.99,
+      "bundle": 39.99
+    },
+    "email_config": {}
+  }
