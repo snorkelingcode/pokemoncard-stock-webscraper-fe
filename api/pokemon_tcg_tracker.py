@@ -21,107 +21,138 @@ logging.basicConfig(
 )
 
 class PokemonTCGTracker:
-    def __init__(self, config_file="config.json"):
-        # Load configuration
-        with open(config_file, 'r') as f:
-            self.config = json.load(f)
-        
-        # Use a list of user agents to rotate
+    def __init__(self):
+        # More comprehensive user agent list
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
         ]
-        self.check_interval = self.config.get('check_interval', 1800)  # Default 30 minutes
-        self.retail_price_thresholds = self.config.get('retail_price_thresholds', {})
-        self.email_config = self.config.get('email_config', {})
         
-        # Store results
-        self.in_stock_items = []
+        # Proxies (in a real implementation, you'd want a rotating proxy list)
+        self.proxies = None  # Consider using a proxy service
+    
+    def create_retry_session(self, retries=3, backoff_factor=0.3, status_forcelist=[403, 429, 500, 502, 503, 504]):
+        """
+        Create a requests session with retry capabilities
+        :param retries: Number of retries
+        :param backoff_factor: Backoff multiplier 
+        :param status_forcelist: HTTP status codes to retry on
+        :return: Configured requests session
+        """
+        # Create retry strategy
+        retry_strategy = Retry(
+            total=retries,
+            status_forcelist=status_forcelist,
+            method_whitelist=["HEAD", "GET", "OPTIONS"],
+            backoff_factor=backoff_factor,
+            raise_on_status=False,
+            respect_retry_after_header=True
+        )
         
-        # Create a session that we'll reuse
-        self.session = requests.Session()
+        # Create adapter
+        adapter = HTTPAdapter(max_retries=retry_strategy)
         
-        # Set up recent expansions for validation
-        self.recent_expansions = [
-            'scarlet', 'violet', 'paldea', 'paradox rift', 'twilight masquerade',
-            'temporal forces', 'pocket monsters', 'obsidian flames', 'paldean fates',
-            '151', 'crown zenith', 'silver tempest', 'lost origin',
-            'astral radiance', 'brilliant stars', 'celebrations'
-        ]
+        # Create session
+        session = requests.Session()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         
-        # Store for direct GameStop product URLs
-        self.gamestop_product_urls = [
-            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-151-elite-trainer-box/368947.html",
-            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-crown-zenith-special-collection-pikachu-vmax/351599.html",
-            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-paldean-fates-elite-trainer-box/377146.html",
-            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-twilight-masquerade-booster-box/393851.html",
-            "https://www.gamestop.com/toys-games/trading-cards/products/pokemon-trading-card-game-scarlet-and-violet-twilight-masquerade-elite-trainer-box/393846.html"
-        ]
+        return session
     
     def get_headers(self):
-        """Generate request headers to mimic a browser"""
-        # Randomly select a user agent
-        user_agent = random.choice(self.user_agents)
-        
+        """
+        Generate comprehensive request headers to mimic browser
+        :return: Dictionary of headers
+        """
         return {
-            'User-Agent': user_agent,
+            'User-Agent': random.choice(self.user_agents),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.google.com/',
-            'DNT': '1',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',  # Do Not Track Request
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-Site': 'same-origin',
             'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0',
         }
     
-    def fetch_page(self, url):
-        """Fetch a page with improved anti-bot circumvention"""
-        max_retries = 3
+    def fetch_page(self, url, timeout=15):
+        """
+        Fetch a page with advanced anti-bot techniques
+        :param url: URL to fetch
+        :param timeout: Request timeout in seconds
+        :return: Page content or None
+        """
+        try:
+            # Random delay to mimic human behavior
+            time.sleep(random.uniform(1, 3))
+            
+            # Create session
+            session = self.create_retry_session()
+            
+            # Prepare headers and proxies
+            headers = self.get_headers()
+            proxies = self.proxies  # Can be None or a proxy configuration
+            
+            # Make the request
+            response = session.get(
+                url, 
+                headers=headers, 
+                proxies=proxies, 
+                timeout=timeout,
+                allow_redirects=True
+            )
+            
+            # Check for successful response
+            response.raise_for_status()
+            
+            # Detect potential bot detection mechanisms
+            if self._is_bot_detected(response):
+                logging.warning(f"Potential bot detection on {url}")
+                return None
+            
+            return response.text
         
-        for attempt in range(max_retries):
-            try:
-                # Add random delay to mimic human behavior
-                delay = random.uniform(1, 3)
-                time.sleep(delay)
-                
-                # Use our session with fresh headers each time
-                headers = self.get_headers()
-                
-                # Add cookies from previous requests
-                response = self.session.get(url, headers=headers, timeout=15)
-                response.raise_for_status()
-                
-                # Check for anti-bot measures
-                if "captcha" in response.text.lower() or "robot" in response.text.lower():
-                    logging.warning(f"CAPTCHA detected on {url}, retrying...")
-                    # Wait longer before retry
-                    time.sleep(random.uniform(5, 10))
-                    continue
-                    
-                # Check for very small responses (usually blocking)
-                if len(response.text) < 1000 and "403" in response.text:
-                    logging.warning(f"Possible block on {url}, response too small")
-                    time.sleep(random.uniform(5, 10))
-                    continue
-                    
-                return response.text
-                
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Error fetching {url}: {str(e)}")
-                if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + random.uniform(1, 3)  # Exponential backoff with jitter
-                    logging.info(f"Retrying in {wait_time:.2f} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    logging.error(f"Failed to fetch {url} after {max_retries} attempts")
-                    return None
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error fetching {url}: {str(e)}")
+            return None
+    
+    def _is_bot_detected(self, response):
+        """
+        Detect potential bot detection mechanisms
+        :param response: Requests response object
+        :return: Boolean indicating if bot was detected
+        """
+        bot_indicators = [
+            'captcha', 'robot', 'challenge', 'forbidden', 
+            'blocked', 'security', 'verify', 'suspicious'
+        ]
+        
+        # Check response text
+        response_text = response.text.lower()
+        
+        # Check for bot detection indicators
+        for indicator in bot_indicators:
+            if indicator in response_text:
+                return True
+        
+        # Check response status code
+        if response.status_code in [403, 429, 503]:
+            return True
+        
+        # Check response size (suspiciously small responses might indicate blocking)
+        if len(response.text) < 1000:
+            return True
+        
+        return False
     
     def validate_product_link(self, product_url, expected_type, expected_name=None):
         """

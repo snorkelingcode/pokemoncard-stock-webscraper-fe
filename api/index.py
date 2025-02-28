@@ -24,7 +24,10 @@ app = FastAPI(title="Pokémon TCG Stock Tracker API")
 # Configure CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust in production to specify your frontend URL
+    allow_origins=[
+        "http://localhost:3000",  # For local development
+        "https://YOUR_VERCEL_DOMAIN.vercel.app",  # Your Vercel-deployed frontend
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
